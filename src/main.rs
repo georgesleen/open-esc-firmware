@@ -4,10 +4,13 @@
 //!
 //! It may need to be adapted to your particular board layout and/or pin assignment.
 //!
-//! See the top-level `README.md` file for Copyright and license details.
+//! See the `Cargo.toml` file for Copyright and license details.
 
 #![no_std]
 #![no_main]
+extern crate embedded_hal;
+extern crate panic_halt;
+extern crate rp2040_hal;
 
 // Ensure we halt the program on panic (if we don't mention this crate it won't
 // be linked)
@@ -21,8 +24,8 @@ use rp2040_hal as hal;
 use hal::pac;
 
 // Some traits we need
-use embedded_hal::delay::DelayNs;
-use embedded_hal::digital::OutputPin;
+use embedded_hal::digital::v2::OutputPin;
+use rp2040_hal::clocks::Clock;
 
 /// The linker will place this boot block at the start of our program image. We
 /// need this to help the ROM bootloader get our code up and running.
@@ -47,6 +50,7 @@ const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 fn main() -> ! {
     // Grab our singleton objects
     let mut pac = pac::Peripherals::take().unwrap();
+    let core = pac::CorePeripherals::take().unwrap();
 
     // Set up the watchdog driver - needed by the clock setup code
     let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
@@ -61,9 +65,10 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
+    .ok()
     .unwrap();
 
-    let mut timer = rp2040_hal::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
 
     // The single-cycle I/O block controls our GPIO pins
     let sio = hal::Sio::new(pac.SIO);
@@ -80,9 +85,9 @@ fn main() -> ! {
     let mut led_pin = pins.gpio25.into_push_pull_output();
     loop {
         led_pin.set_high().unwrap();
-        timer.delay_ms(500);
+        delay.delay_ms(500);
         led_pin.set_low().unwrap();
-        timer.delay_ms(500);
+        delay.delay_ms(500);
     }
 }
 
