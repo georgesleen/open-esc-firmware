@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 
-use core::marker::PhantomData;
-
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output, Pin};
 use embassy_rp::Peri;
@@ -54,69 +52,47 @@ const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
     },
 ];
 
-struct DrivenHigh;
-struct DrivenLow;
-struct HighImpedance;
-
-struct HalfBridge<'d, State> {
+struct HalfBridge<'d> {
     high_pin: Output<'d>,
     low_pin: Output<'d>,
-    _state: PhantomData<State>,
 }
 
-impl<'d> HalfBridge<'d, HighImpedance> {
+impl<'d> HalfBridge<'d> {
     /// Instantates a new half bridge driver with two GPIO
     fn new(high_pin: Peri<'d, impl Pin>, low_pin: Peri<'d, impl Pin>) -> Self {
         Self {
             high_pin: Output::new(high_pin, Level::Low),
             low_pin: Output::new(low_pin, Level::Low),
-            _state: PhantomData::<HighImpedance>,
         }
     }
 
     /// Changes the half bridge output to V+
-    fn set_high(mut self) -> HalfBridge<'d, DrivenHigh> {
+    fn set_high(mut self) -> HalfBridge<'d> {
         self.high_pin.set_high();
         self.low_pin.set_low();
         HalfBridge {
             high_pin: self.high_pin,
             low_pin: self.low_pin,
-            _state: PhantomData,
         }
     }
 
     /// Changes the half bridge output to V-
-    fn set_low(mut self) -> HalfBridge<'d, DrivenLow> {
+    fn set_low(mut self) -> HalfBridge<'d> {
         self.high_pin.set_low();
         self.low_pin.set_high();
         HalfBridge {
             high_pin: self.high_pin,
             low_pin: self.low_pin,
-            _state: PhantomData,
         }
     }
-}
 
-impl<'d> HalfBridge<'d, DrivenHigh> {
-    fn set_high_impedance(mut self) -> HalfBridge<'d, HighImpedance> {
+    /// Changes the half bridge to a high impedance output
+    fn set_high_impedance(mut self) -> HalfBridge<'d> {
         self.high_pin.set_low();
         self.low_pin.set_low();
         HalfBridge {
             high_pin: self.high_pin,
             low_pin: self.low_pin,
-            _state: PhantomData,
-        }
-    }
-}
-
-impl<'d> HalfBridge<'d, DrivenLow> {
-    fn set_high_impedance(mut self) -> HalfBridge<'d, HighImpedance> {
-        self.high_pin.set_low();
-        self.low_pin.set_low();
-        HalfBridge {
-            high_pin: self.high_pin,
-            low_pin: self.low_pin,
-            _state: PhantomData,
         }
     }
 }
@@ -136,9 +112,9 @@ async fn main(spawner: Spawner) {
         ..
     } = p;
 
-    let half_bridge_a = HalfBridge::<HighImpedance>::new(PIN_10, PIN_11);
-    let half_bridge_b = HalfBridge::<HighImpedance>::new(PIN_12, PIN_13);
-    let half_bridge_c = HalfBridge::<HighImpedance>::new(PIN_14, PIN_15);
+    let half_bridge_a = HalfBridge::new(PIN_10, PIN_11);
+    let half_bridge_b = HalfBridge::new(PIN_12, PIN_13);
+    let half_bridge_c = HalfBridge::new(PIN_14, PIN_15);
 
     let _ = spawner.spawn(bldc_driver_task(
         half_bridge_a,
@@ -153,20 +129,38 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn bldc_driver_task(
-    half_bridge_a: HalfBridge<'static, HighImpedance>,
-    half_bridge_b: HalfBridge<'static, HighImpedance>,
-    half_bridge_c: HalfBridge<'static, HighImpedance>,
+    mut half_bridge_a: HalfBridge<'static>,
+    mut half_bridge_b: HalfBridge<'static>,
+    mut half_bridge_c: HalfBridge<'static>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(1000));
-
-    let mut half_bridge_a = half_bridge_a.set_high();
-    let mut half_bridge_b = half_bridge_b.set_low();
+    let mut ticker = Ticker::every(Duration::from_millis(50));
 
     loop {
         ticker.next().await;
         step = (step + 1) % THREE_PHASE_COMMUTATION_TABLE.len();
 
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
+
+        half_bridge_a = match output.phase_a {
+            Some(1.0) => half_bridge_a.set_high(),
+            Some(0.0) => half_bridge_a.set_low(),
+            None => half_bridge_a.set_high_impedance(),
+            _ => half_bridge_a.set_high_impedance(),
+        };
+
+        half_bridge_b = match output.phase_b {
+            Some(1.0) => half_bridge_b.set_high(),
+            Some(0.0) => half_bridge_b.set_low(),
+            None => half_bridge_b.set_high_impedance(),
+            _ => half_bridge_b.set_high_impedance(),
+        };
+
+        half_bridge_c = match output.phase_c {
+            Some(1.0) => half_bridge_c.set_high(),
+            Some(0.0) => half_bridge_c.set_low(),
+            None => half_bridge_c.set_high_impedance(),
+            _ => half_bridge_c.set_high_impedance(),
+        };
     }
 }
