@@ -126,8 +126,6 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     let mut onboard_led = Output::new(p.PIN_25, Level::High);
 
-    onboard_led.set_high();
-
     let embassy_rp::Peripherals {
         PIN_10,
         PIN_11,
@@ -151,19 +149,19 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn bldc_driver_task(
-    mut half_bridge_a: HalfBridge<'static, HighImpedance>,
-    mut half_bridge_b: HalfBridge<'static, HighImpedance>,
-    mut half_bridge_c: HalfBridge<'static, HighImpedance>,
+    half_bridge_a: HalfBridge<'static, HighImpedance>,
+    half_bridge_b: HalfBridge<'static, HighImpedance>,
+    half_bridge_c: HalfBridge<'static, HighImpedance>,
 ) {
     let mut step: usize = 0;
     let mut ticker = Ticker::every(Duration::from_millis(1000));
 
-    half_bridge_a.set_high();
-    half_bridge_b.set_low();
+    let mut half_bridge_a = half_bridge_a.set_high();
+    let mut half_bridge_b = half_bridge_b.set_low();
 
     loop {
         ticker.next().await;
-        step = step + 1 % THREE_PHASE_COMMUTATION_TABLE.len();
+        step = (step + 1) % THREE_PHASE_COMMUTATION_TABLE.len();
 
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
     }
