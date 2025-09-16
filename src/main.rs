@@ -124,7 +124,7 @@ impl<'d> HalfBridge<'d, DrivenLow> {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    let mut onboard_led = Output::new(p.PIN_25, Level::High);
+    let onboard_led = Output::new(p.PIN_25, Level::High);
 
     let embassy_rp::Peripherals {
         PIN_10,
@@ -145,6 +145,10 @@ async fn main(spawner: Spawner) {
         half_bridge_b,
         half_bridge_c,
     ));
+
+    loop {
+        embassy_time::Timer::after(Duration::from_secs(1)).await;
+    }
 }
 
 #[embassy_executor::task]
