@@ -1,53 +1,170 @@
 #![no_std]
 #![no_main]
 
-/// This example demonstrates how to access a given pin from more than one embassy task
-/// The on-board LED is toggled by two tasks with slightly different periods, leading to the
-/// apparent duty cycle of the LED increasing, then decreasing, linearly. The phenomenon is similar
-/// to interference and the 'beats' you can hear if you play two frequencies close to one another
-/// [Link explaining it](https://www.physicsclassroom.com/class/sound/Lesson-3/Interference-and-Beats)
-use defmt::*;
+use core::marker::PhantomData;
+
 use embassy_executor::Spawner;
-use embassy_rp::gpio;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy_sync::mutex::Mutex;
+use embassy_rp::gpio::{Level, Output, Pin};
+use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
-use gpio::{Level, Output};
 use {defmt_rtt as _, panic_probe as _};
 
-type LedType = Mutex<ThreadModeRawMutex, Option<Output<'static>>>;
-static LED: LedType = Mutex::new(None);
+/// Represents an optional duty cycle
+type DutyCycle = Option<f32>;
+
+/// Represents the control outputs for a three phase inverter.
+#[derive(Copy, Clone)]
+struct PhaseOutput {
+    phase_a: DutyCycle,
+    phase_b: DutyCycle,
+    phase_c: DutyCycle,
+}
+
+/// Lookup table for phase voltages when commuting a three phase inverter.
+const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
+    PhaseOutput {
+        phase_a: Some(1.0),
+        phase_b: Some(0.0),
+        phase_c: None,
+    },
+    PhaseOutput {
+        phase_a: Some(1.0),
+        phase_b: None,
+        phase_c: Some(0.0),
+    },
+    PhaseOutput {
+        phase_a: None,
+        phase_b: Some(1.0),
+        phase_c: Some(0.0),
+    },
+    PhaseOutput {
+        phase_a: Some(0.0),
+        phase_b: Some(1.0),
+        phase_c: None,
+    },
+    PhaseOutput {
+        phase_a: Some(0.0),
+        phase_b: None,
+        phase_c: Some(1.0),
+    },
+    PhaseOutput {
+        phase_a: None,
+        phase_b: Some(0.0),
+        phase_c: Some(1.0),
+    },
+];
+
+struct DrivenHigh;
+struct DrivenLow;
+struct HighImpedance;
+
+struct HalfBridge<'d, State> {
+    high_pin: Output<'d>,
+    low_pin: Output<'d>,
+    _state: PhantomData<State>,
+}
+
+impl<'d> HalfBridge<'d, HighImpedance> {
+    /// Instantates a new half bridge driver with two GPIO
+    fn new(high_pin: Peri<'d, impl Pin>, low_pin: Peri<'d, impl Pin>) -> Self {
+        Self {
+            high_pin: Output::new(high_pin, Level::Low),
+            low_pin: Output::new(low_pin, Level::Low),
+            _state: PhantomData::<HighImpedance>,
+        }
+    }
+
+    /// Changes the half bridge output to V+
+    fn set_high(mut self) -> HalfBridge<'d, DrivenHigh> {
+        self.high_pin.set_high();
+        self.low_pin.set_low();
+        HalfBridge {
+            high_pin: self.high_pin,
+            low_pin: self.low_pin,
+            _state: PhantomData,
+        }
+    }
+
+    /// Changes the half bridge output to V-
+    fn set_low(mut self) -> HalfBridge<'d, DrivenLow> {
+        self.high_pin.set_low();
+        self.low_pin.set_high();
+        HalfBridge {
+            high_pin: self.high_pin,
+            low_pin: self.low_pin,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<'d> HalfBridge<'d, DrivenHigh> {
+    fn set_high_impedance(mut self) -> HalfBridge<'d, HighImpedance> {
+        self.high_pin.set_low();
+        self.low_pin.set_low();
+        HalfBridge {
+            high_pin: self.high_pin,
+            low_pin: self.low_pin,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<'d> HalfBridge<'d, DrivenLow> {
+    fn set_high_impedance(mut self) -> HalfBridge<'d, HighImpedance> {
+        self.high_pin.set_low();
+        self.low_pin.set_low();
+        HalfBridge {
+            high_pin: self.high_pin,
+            low_pin: self.low_pin,
+            _state: PhantomData,
+        }
+    }
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    // set the content of the global LED reference to the real LED pin
-    let led = Output::new(p.PIN_25, Level::High);
-    // inner scope is so that once the mutex is written to, the MutexGuard is dropped, thus the
-    // Mutex is released
-    {
-        *(LED.lock().await) = Some(led);
-    }
-    let dt = 100 * 1_000_000;
-    let k = 1.003;
+    let mut onboard_led = Output::new(p.PIN_25, Level::High);
 
-    let _ = spawner.spawn(toggle_led(&LED, Duration::from_nanos(dt)));
-    let _ = spawner.spawn(toggle_led(
-        &LED,
-        Duration::from_nanos((dt as f64 * k) as u64),
+    onboard_led.set_high();
+
+    let embassy_rp::Peripherals {
+        PIN_10,
+        PIN_11,
+        PIN_12,
+        PIN_13,
+        PIN_14,
+        PIN_15,
+        ..
+    } = p;
+
+    let half_bridge_a = HalfBridge::<HighImpedance>::new(PIN_10, PIN_11);
+    let half_bridge_b = HalfBridge::<HighImpedance>::new(PIN_12, PIN_13);
+    let half_bridge_c = HalfBridge::<HighImpedance>::new(PIN_14, PIN_15);
+
+    let _ = spawner.spawn(bldc_driver_task(
+        half_bridge_a,
+        half_bridge_b,
+        half_bridge_c,
     ));
 }
 
-#[embassy_executor::task(pool_size = 2)]
-async fn toggle_led(led: &'static LedType, delay: Duration) {
-    let mut ticker = Ticker::every(delay);
+#[embassy_executor::task]
+async fn bldc_driver_task(
+    mut half_bridge_a: HalfBridge<'static, HighImpedance>,
+    mut half_bridge_b: HalfBridge<'static, HighImpedance>,
+    mut half_bridge_c: HalfBridge<'static, HighImpedance>,
+) {
+    let mut step: usize = 0;
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
+
+    half_bridge_a.set_high();
+    half_bridge_b.set_low();
+
     loop {
-        {
-            let mut led_unlocked = led.lock().await;
-            if let Some(pin_ref) = led_unlocked.as_mut() {
-                pin_ref.toggle();
-            }
-        }
         ticker.next().await;
+        step = step + 1 % THREE_PHASE_COMMUTATION_TABLE.len();
+
+        let output = THREE_PHASE_COMMUTATION_TABLE[step];
     }
 }
