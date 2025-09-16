@@ -100,7 +100,7 @@ impl<'d> HalfBridge<'d> {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    let onboard_led = Output::new(p.PIN_25, Level::High);
+    let _onboard_led = Output::new(p.PIN_25, Level::High);
 
     let embassy_rp::Peripherals {
         PIN_10,
