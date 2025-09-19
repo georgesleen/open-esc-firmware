@@ -7,7 +7,46 @@ use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
 use {defmt_rtt as _, panic_probe as _};
 
-/// Represents an optional duty cycle
+/// Max duty cycle for driving inverter phases
+const MAX_DUTY_CYCLE: DutyCycle = Some(0.1);
+/// Min duty cycle for driving inverter phases
+const MIN_DUTY_CYCLE: DutyCycle = Some(0.0);
+
+/// Lookup table for phase voltages when commuting a three phase inverter.
+const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
+    PhaseOutput {
+        phase_a: MAX_DUTY_CYCLE,
+        phase_b: MIN_DUTY_CYCLE,
+        phase_c: None,
+    },
+    PhaseOutput {
+        phase_a: MAX_DUTY_CYCLE,
+        phase_b: None,
+        phase_c: MIN_DUTY_CYCLE,
+    },
+    PhaseOutput {
+        phase_a: None,
+        phase_b: MAX_DUTY_CYCLE,
+        phase_c: MIN_DUTY_CYCLE,
+    },
+    PhaseOutput {
+        phase_a: MIN_DUTY_CYCLE,
+        phase_b: MAX_DUTY_CYCLE,
+        phase_c: None,
+    },
+    PhaseOutput {
+        phase_a: MIN_DUTY_CYCLE,
+        phase_b: None,
+        phase_c: MAX_DUTY_CYCLE,
+    },
+    PhaseOutput {
+        phase_a: None,
+        phase_b: MIN_DUTY_CYCLE,
+        phase_c: MAX_DUTY_CYCLE,
+    },
+];
+
+/// Represents a three state duty cycle
 type DutyCycle = Option<f32>;
 
 /// Represents the control outputs for a three phase inverter.
@@ -17,40 +56,6 @@ struct PhaseOutput {
     phase_b: DutyCycle,
     phase_c: DutyCycle,
 }
-
-/// Lookup table for phase voltages when commuting a three phase inverter.
-const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
-    PhaseOutput {
-        phase_a: Some(1.0),
-        phase_b: Some(0.0),
-        phase_c: None,
-    },
-    PhaseOutput {
-        phase_a: Some(1.0),
-        phase_b: None,
-        phase_c: Some(0.0),
-    },
-    PhaseOutput {
-        phase_a: None,
-        phase_b: Some(1.0),
-        phase_c: Some(0.0),
-    },
-    PhaseOutput {
-        phase_a: Some(0.0),
-        phase_b: Some(1.0),
-        phase_c: None,
-    },
-    PhaseOutput {
-        phase_a: Some(0.0),
-        phase_b: None,
-        phase_c: Some(1.0),
-    },
-    PhaseOutput {
-        phase_a: None,
-        phase_b: Some(0.0),
-        phase_c: Some(1.0),
-    },
-];
 
 struct HalfBridge<'d> {
     high_pin: Output<'d>,
@@ -122,6 +127,7 @@ async fn main(spawner: Spawner) {
         half_bridge_c,
     ));
 
+    // Keep the on board LED in scope
     loop {
         embassy_time::Timer::after(Duration::from_secs(1)).await;
     }
