@@ -148,7 +148,7 @@ async fn bldc_driver_task(
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut ticker = Ticker::every(Duration::from_millis(250));
 
     loop {
         ticker.next().await;
