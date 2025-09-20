@@ -1,16 +1,19 @@
 #![no_std]
 #![no_main]
 
+use core::marker::PhantomData;
+
 use embassy_executor::Spawner;
-use embassy_rp::gpio::{Level, Output, Pin};
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::pwm::{ChannelAPin, ChannelBPin, Config, Pwm, PwmOutput, SetDutyCycle, Slice};
 use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
 use {defmt_rtt as _, panic_probe as _};
 
 /// Max duty cycle for driving inverter phases
-const MAX_DUTY_CYCLE: DutyCycle = Some(0.1);
+const MAX_DUTY_CYCLE: DutyCycle = Some(10);
 /// Min duty cycle for driving inverter phases
-const MIN_DUTY_CYCLE: DutyCycle = Some(0.0);
+const MIN_DUTY_CYCLE: DutyCycle = Some(0);
 
 /// Lookup table for phase voltages when commuting a three phase inverter.
 const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
@@ -47,7 +50,7 @@ const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
 ];
 
 /// Represents a three state duty cycle
-type DutyCycle = Option<f32>;
+type DutyCycle = Option<u8>;
 
 /// Represents the control outputs for a three phase inverter.
 #[derive(Copy, Clone)]
@@ -57,48 +60,53 @@ struct PhaseOutput {
     phase_c: DutyCycle,
 }
 
-struct HalfBridge<'d> {
-    high_pin: Output<'d>,
-    low_pin: Output<'d>,
+/// Represents a half bridge driven by a high side and low side enable pin
+struct HalfBridge<'d, S>
+where
+    S: Slice,
+{
+    high_pwm: PwmOutput<'d>,
+    low_pwm: PwmOutput<'d>,
+    _slice: PhantomData<S>,
 }
 
-impl<'d> HalfBridge<'d> {
-    /// Instantates a new half bridge driver with two GPIO
-    fn new(high_pin: Peri<'d, impl Pin>, low_pin: Peri<'d, impl Pin>) -> Self {
+impl<'d, S> HalfBridge<'d, S>
+where
+    S: Slice,
+{
+    /// Instantates a new half bridge driver with two GPIO and a PWM slice
+    fn new(
+        slice: Peri<'d, S>,
+        high: Peri<'d, impl ChannelAPin<S>>,
+        low: Peri<'d, impl ChannelBPin<S>>,
+    ) -> Self {
+        let pwm_config = Config::default();
+        let pwm = Pwm::new_output_ab(slice, high, low, pwm_config);
+        let (high_pwm, low_pwm) = pwm.split();
+
         Self {
-            high_pin: Output::new(high_pin, Level::Low),
-            low_pin: Output::new(low_pin, Level::Low),
+            high_pwm: high_pwm.unwrap(),
+            low_pwm: low_pwm.unwrap(),
+            _slice: PhantomData,
         }
     }
 
-    /// Changes the half bridge output to V+
-    fn set_high(mut self) -> HalfBridge<'d> {
-        self.high_pin.set_high();
-        self.low_pin.set_low();
-        HalfBridge {
-            high_pin: self.high_pin,
-            low_pin: self.low_pin,
-        }
+    /// Set the half bridge to PWM the high side gate to the specified duty cycle
+    fn set_high(&mut self, percentage: u8) {
+        let _ = self.low_pwm.set_duty_cycle_fully_off();
+        let _ = self.high_pwm.set_duty_cycle_percent(percentage);
     }
 
-    /// Changes the half bridge output to V-
-    fn set_low(mut self) -> HalfBridge<'d> {
-        self.high_pin.set_low();
-        self.low_pin.set_high();
-        HalfBridge {
-            high_pin: self.high_pin,
-            low_pin: self.low_pin,
-        }
+    /// Set the half bridge to be driven fully off
+    fn set_low(&mut self) {
+        let _ = self.high_pwm.set_duty_cycle_fully_off();
+        let _ = self.low_pwm.set_duty_cycle_fully_on();
     }
 
     /// Changes the half bridge to a high impedance output
-    fn set_high_impedance(mut self) -> HalfBridge<'d> {
-        self.high_pin.set_low();
-        self.low_pin.set_low();
-        HalfBridge {
-            high_pin: self.high_pin,
-            low_pin: self.low_pin,
-        }
+    fn set_high_impedance(&mut self) {
+        let _ = self.high_pwm.set_duty_cycle_fully_off();
+        let _ = self.low_pwm.set_duty_cycle_fully_off();
     }
 }
 
@@ -117,9 +125,9 @@ async fn main(spawner: Spawner) {
         ..
     } = p;
 
-    let half_bridge_a = HalfBridge::new(PIN_10, PIN_11);
-    let half_bridge_b = HalfBridge::new(PIN_12, PIN_13);
-    let half_bridge_c = HalfBridge::new(PIN_14, PIN_15);
+    let half_bridge_a = HalfBridge::new(p.PWM_SLICE5, PIN_10, PIN_11);
+    let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13);
+    let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15);
 
     let _ = spawner.spawn(bldc_driver_task(
         half_bridge_a,
@@ -135,9 +143,9 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn bldc_driver_task(
-    mut half_bridge_a: HalfBridge<'static>,
-    mut half_bridge_b: HalfBridge<'static>,
-    mut half_bridge_c: HalfBridge<'static>,
+    mut half_bridge_a: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE5>,
+    mut half_bridge_b: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE6>,
+    mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
     let mut ticker = Ticker::every(Duration::from_millis(50));
@@ -148,25 +156,22 @@ async fn bldc_driver_task(
 
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
 
-        half_bridge_a = match output.phase_a {
-            Some(1.0) => half_bridge_a.set_high(),
-            Some(0.0) => half_bridge_a.set_low(),
+        match output.phase_a {
+            Some(0) => half_bridge_a.set_low(),
+            Some(percentage) => half_bridge_a.set_high(percentage),
             None => half_bridge_a.set_high_impedance(),
-            _ => half_bridge_a.set_high_impedance(),
         };
 
-        half_bridge_b = match output.phase_b {
-            Some(1.0) => half_bridge_b.set_high(),
-            Some(0.0) => half_bridge_b.set_low(),
+        match output.phase_b {
+            Some(0) => half_bridge_b.set_low(),
+            Some(percentage) => half_bridge_b.set_high(percentage),
             None => half_bridge_b.set_high_impedance(),
-            _ => half_bridge_b.set_high_impedance(),
         };
 
-        half_bridge_c = match output.phase_c {
-            Some(1.0) => half_bridge_c.set_high(),
-            Some(0.0) => half_bridge_c.set_low(),
+        match output.phase_c {
+            Some(0) => half_bridge_c.set_low(),
+            Some(percentage) => half_bridge_c.set_high(percentage),
             None => half_bridge_c.set_high_impedance(),
-            _ => half_bridge_c.set_high_impedance(),
         };
     }
 }
