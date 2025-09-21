@@ -10,54 +10,61 @@ use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
 use {defmt_rtt as _, panic_probe as _};
 
+/// Fully on duty cycle
+const FULLY_ON_DUTY_CYCLE: u8 = 100;
 /// Max duty cycle for driving inverter phases
-const MAX_DUTY_CYCLE: DutyCycle = Some(10);
+const MAX_INVERTER_DUTY_CYCLE: u8 = 10;
 /// Min duty cycle for driving inverter phases
-const MIN_DUTY_CYCLE: DutyCycle = Some(0);
+const MIN_INVERTER_DUTY_CYCLE: u8 = 0;
 
 /// Lookup table for phase voltages when commuting a three phase inverter.
-const THREE_PHASE_COMMUTATION_TABLE: [PhaseOutput; 6] = [
-    PhaseOutput {
-        phase_a: MAX_DUTY_CYCLE,
-        phase_b: MIN_DUTY_CYCLE,
-        phase_c: None,
+const THREE_PHASE_COMMUTATION_TABLE: [InverterOutput; 6] = [
+    InverterOutput {
+        phase_a: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
+        phase_b: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_c: PhaseState::HighImpedance,
     },
-    PhaseOutput {
-        phase_a: MAX_DUTY_CYCLE,
-        phase_b: None,
-        phase_c: MIN_DUTY_CYCLE,
+    InverterOutput {
+        phase_a: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
+        phase_b: PhaseState::HighImpedance,
+        phase_c: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
     },
-    PhaseOutput {
-        phase_a: None,
-        phase_b: MAX_DUTY_CYCLE,
-        phase_c: MIN_DUTY_CYCLE,
+    InverterOutput {
+        phase_a: PhaseState::HighImpedance,
+        phase_b: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
+        phase_c: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
     },
-    PhaseOutput {
-        phase_a: MIN_DUTY_CYCLE,
-        phase_b: MAX_DUTY_CYCLE,
-        phase_c: None,
+    InverterOutput {
+        phase_a: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_b: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
+        phase_c: PhaseState::HighImpedance,
     },
-    PhaseOutput {
-        phase_a: MIN_DUTY_CYCLE,
-        phase_b: None,
-        phase_c: MAX_DUTY_CYCLE,
+    InverterOutput {
+        phase_a: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_b: PhaseState::HighImpedance,
+        phase_c: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
     },
-    PhaseOutput {
-        phase_a: None,
-        phase_b: MIN_DUTY_CYCLE,
-        phase_c: MAX_DUTY_CYCLE,
+    InverterOutput {
+        phase_a: PhaseState::HighImpedance,
+        phase_b: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_c: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
     },
 ];
 
-/// Represents a three state duty cycle
-type DutyCycle = Option<u8>;
+/// Represents how a half bridge phase should be driven
+#[derive(Copy, Clone)]
+enum PhaseState {
+    HighDutyCycle(u8),
+    LowDutyCycle(u8),
+    HighImpedance,
+}
 
 /// Represents the control outputs for a three phase inverter.
 #[derive(Copy, Clone)]
-struct PhaseOutput {
-    phase_a: DutyCycle,
-    phase_b: DutyCycle,
-    phase_c: DutyCycle,
+struct InverterOutput {
+    phase_a: PhaseState,
+    phase_b: PhaseState,
+    phase_c: PhaseState,
 }
 
 /// Represents a half bridge driven by a high side and low side enable pin
@@ -80,7 +87,15 @@ where
         high: Peri<'d, impl ChannelAPin<S>>,
         low: Peri<'d, impl ChannelBPin<S>>,
     ) -> Self {
-        let pwm_config = Config::default();
+        let desired_freq_hz = 25_000;
+        let clock_freq_hz = embassy_rp::clocks::clk_sys_freq();
+        let divider = 16u8;
+        let period = (clock_freq_hz / (desired_freq_hz * divider as u32)) as u16 - 1;
+
+        let mut pwm_config = Config::default();
+        pwm_config.top = period;
+        pwm_config.divider = divider.into();
+
         let pwm = Pwm::new_output_ab(slice, high, low, pwm_config);
         let (high_pwm, low_pwm) = pwm.split();
 
@@ -97,8 +112,8 @@ where
         let _ = self.high_pwm.set_duty_cycle_percent(percentage);
     }
 
-    /// Set the half bridge to be driven fully off
-    fn set_low(&mut self) {
+    /// Set the half bridge to PWM the low side gate to the specified duty cycle
+    fn set_low(&mut self, percentage: u8) {
         let _ = self.high_pwm.set_duty_cycle_fully_off();
         let _ = self.low_pwm.set_duty_cycle_fully_on();
     }
@@ -116,8 +131,8 @@ async fn main(spawner: Spawner) {
     let _onboard_led = Output::new(p.PIN_25, Level::High);
 
     let embassy_rp::Peripherals {
-        PIN_10,
-        PIN_11,
+        PIN_4,
+        PIN_5,
         PIN_12,
         PIN_13,
         PIN_14,
@@ -125,7 +140,7 @@ async fn main(spawner: Spawner) {
         ..
     } = p;
 
-    let half_bridge_a = HalfBridge::new(p.PWM_SLICE5, PIN_10, PIN_11);
+    let half_bridge_a = HalfBridge::new(p.PWM_SLICE2, PIN_4, PIN_5);
     let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13);
     let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15);
 
@@ -143,7 +158,7 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn bldc_driver_task(
-    mut half_bridge_a: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE5>,
+    mut half_bridge_a: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE2>,
     mut half_bridge_b: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE6>,
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
@@ -157,21 +172,21 @@ async fn bldc_driver_task(
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
 
         match output.phase_a {
-            Some(0) => half_bridge_a.set_low(),
-            Some(percentage) => half_bridge_a.set_high(percentage),
-            None => half_bridge_a.set_high_impedance(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_a.set_high(percentage),
+            PhaseState::LowDutyCycle(percentage) => half_bridge_a.set_low(percentage),
+            PhaseState::HighImpedance => half_bridge_a.set_high_impedance(),
         };
 
         match output.phase_b {
-            Some(0) => half_bridge_b.set_low(),
-            Some(percentage) => half_bridge_b.set_high(percentage),
-            None => half_bridge_b.set_high_impedance(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_b.set_high(percentage),
+            PhaseState::LowDutyCycle(percentage) => half_bridge_b.set_low(percentage),
+            PhaseState::HighImpedance => half_bridge_b.set_high_impedance(),
         };
 
         match output.phase_c {
-            Some(0) => half_bridge_c.set_low(),
-            Some(percentage) => half_bridge_c.set_high(percentage),
-            None => half_bridge_c.set_high_impedance(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_c.set_high(percentage),
+            PhaseState::LowDutyCycle(percentage) => half_bridge_c.set_low(percentage),
+            PhaseState::HighImpedance => half_bridge_c.set_high_impedance(),
         };
     }
 }

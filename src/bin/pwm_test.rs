@@ -9,7 +9,7 @@
 
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_rp::peripherals::{PIN_25, PIN_4, PWM_SLICE2, PWM_SLICE4};
+use embassy_rp::peripherals::{PIN_10, PIN_4, PWM_SLICE2, PWM_SLICE5};
 use embassy_rp::pwm::{Config, Pwm, SetDutyCycle};
 use embassy_rp::Peri;
 use embassy_time::Timer;
@@ -18,7 +18,7 @@ use {defmt_rtt as _, panic_probe as _};
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-    let _ = spawner.spawn(pwm_set_config(p.PWM_SLICE4, p.PIN_25));
+    let _ = spawner.spawn(pwm_set_config(p.PWM_SLICE5, p.PIN_10));
     let _ = spawner.spawn(pwm_set_dutycycle(p.PWM_SLICE2, p.PIN_4));
 }
 
@@ -27,11 +27,11 @@ async fn main(spawner: Spawner) {
 /// Using the onboard led, if You are using a different Board than plain Pico2 (i.e. W variant)
 /// you must use another slice & pin and an appropriate resistor.
 #[embassy_executor::task]
-async fn pwm_set_config(slice4: Peri<'static, PWM_SLICE4>, pin25: Peri<'static, PIN_25>) {
+async fn pwm_set_config(slice5: Peri<'static, PWM_SLICE5>, pin10: Peri<'static, PIN_10>) {
     let mut c = Config::default();
     c.top = 32_768;
     c.compare_b = 8;
-    let mut pwm = Pwm::new_output_b(slice4, pin25, c.clone());
+    let mut pwm = Pwm::new_output_a(slice5, pin10, c.clone());
 
     loop {
         info!("current LED duty cycle: {}/32768", c.compare_b);
