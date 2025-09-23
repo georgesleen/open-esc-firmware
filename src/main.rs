@@ -72,10 +72,9 @@ struct HalfBridge<'d, S>
 where
     S: Slice,
 {
-    high_pwm: PwmOutput<'d>,
-    low_pwm: PwmOutput<'d>,
-    pwm_frequency_hz: u32,
-    dead_time_ns: u32,
+    pwm: Pwm<'d>,
+    top: u16,
+    dead_time_ticks: u32,
     _slice: PhantomData<S>,
 }
 
@@ -94,39 +93,44 @@ where
         let clock_freq_hz = embassy_rp::clocks::clk_sys_freq();
         let divider = 16u8;
         let period = (clock_freq_hz / (pwm_frequency_hz * divider as u32)) as u16 - 1;
+        let dead_time_ticks = (dead_time_ns * clock_freq_hz / divider as u32) / 1_000_000_000;
 
         let mut pwm_config = Config::default();
         pwm_config.top = period;
         pwm_config.divider = divider.into();
 
         let pwm = Pwm::new_output_ab(slice, high_pwm, low_pwm, pwm_config);
-        let (high_pwm, low_pwm) = pwm.split();
 
         Self {
-            high_pwm: high_pwm.unwrap(),
-            low_pwm: low_pwm.unwrap(),
-            pwm_frequency_hz: pwm_frequency_hz,
-            dead_time_ns: dead_time_ns,
+            pwm: pwm,
+            top: period,
+            dead_time_ticks: dead_time_ticks,
             _slice: PhantomData,
         }
     }
 
     /// Set the half bridge to PWM the high side gate to the specified duty cycle
     fn set_high(&mut self, percentage: u8) {
-        let _ = self.low_pwm.set_duty_cycle_fully_off();
-        let _ = self.high_pwm.set_duty_cycle_percent(percentage);
+        let (high_pwm, low_pwm) = self.pwm.split_by_ref();
+
+        let _ = low_pwm.unwrap().set_duty_cycle_fully_off();
+        let _ = high_pwm.unwrap().set_duty_cycle_percent(percentage);
     }
 
     /// Set the half bridge to be driven low
     fn set_low(&mut self) {
-        let _ = self.high_pwm.set_duty_cycle_fully_off();
-        let _ = self.low_pwm.set_duty_cycle_fully_on();
+        let (high_pwm, low_pwm) = self.pwm.split_by_ref();
+
+        let _ = high_pwm.unwrap().set_duty_cycle_fully_off();
+        let _ = low_pwm.unwrap().set_duty_cycle_fully_on();
     }
 
     /// Changes the half bridge to a high impedance output
     fn set_high_impedance(&mut self) {
-        let _ = self.high_pwm.set_duty_cycle_fully_off();
-        let _ = self.low_pwm.set_duty_cycle_fully_off();
+        let (high_pwm, low_pwm) = self.pwm.split_by_ref();
+
+        let _ = high_pwm.unwrap().set_duty_cycle_fully_off();
+        let _ = low_pwm.unwrap().set_duty_cycle_fully_off();
     }
 }
 
@@ -168,7 +172,7 @@ async fn bldc_driver_task(
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(5000));
+    let mut ticker = Ticker::every(Duration::from_millis(500));
 
     loop {
         ticker.next().await;
