@@ -13,7 +13,7 @@ use {defmt_rtt as _, panic_probe as _};
 /// Fully on duty cycle
 const FULLY_ON_DUTY_CYCLE: u8 = 100;
 /// Max duty cycle for driving inverter phases
-const MAX_INVERTER_DUTY_CYCLE: u8 = 10;
+const MAX_INVERTER_DUTY_CYCLE: u8 = 20;
 /// Min duty cycle for driving inverter phases
 const MIN_INVERTER_DUTY_CYCLE: u8 = 0;
 
@@ -21,32 +21,32 @@ const MIN_INVERTER_DUTY_CYCLE: u8 = 0;
 const THREE_PHASE_COMMUTATION_TABLE: [InverterOutput; 6] = [
     InverterOutput {
         phase_a: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
-        phase_b: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_b: PhaseState::Low,
         phase_c: PhaseState::HighImpedance,
     },
     InverterOutput {
         phase_a: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
         phase_b: PhaseState::HighImpedance,
-        phase_c: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_c: PhaseState::Low,
     },
     InverterOutput {
         phase_a: PhaseState::HighImpedance,
         phase_b: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
-        phase_c: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_c: PhaseState::Low,
     },
     InverterOutput {
-        phase_a: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_a: PhaseState::Low,
         phase_b: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
         phase_c: PhaseState::HighImpedance,
     },
     InverterOutput {
-        phase_a: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_a: PhaseState::Low,
         phase_b: PhaseState::HighImpedance,
         phase_c: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
     },
     InverterOutput {
         phase_a: PhaseState::HighImpedance,
-        phase_b: PhaseState::LowDutyCycle(FULLY_ON_DUTY_CYCLE),
+        phase_b: PhaseState::Low,
         phase_c: PhaseState::HighDutyCycle(MAX_INVERTER_DUTY_CYCLE),
     },
 ];
@@ -55,7 +55,7 @@ const THREE_PHASE_COMMUTATION_TABLE: [InverterOutput; 6] = [
 #[derive(Copy, Clone)]
 enum PhaseState {
     HighDutyCycle(u8),
-    LowDutyCycle(u8),
+    Low,
     HighImpedance,
 }
 
@@ -74,6 +74,8 @@ where
 {
     high_pwm: PwmOutput<'d>,
     low_pwm: PwmOutput<'d>,
+    pwm_frequency_hz: u32,
+    dead_time_ns: u32,
     _slice: PhantomData<S>,
 }
 
@@ -84,24 +86,27 @@ where
     /// Instantates a new half bridge driver with two GPIO and a PWM slice
     fn new(
         slice: Peri<'d, S>,
-        high: Peri<'d, impl ChannelAPin<S>>,
-        low: Peri<'d, impl ChannelBPin<S>>,
+        high_pwm: Peri<'d, impl ChannelAPin<S>>,
+        low_pwm: Peri<'d, impl ChannelBPin<S>>,
+        pwm_frequency_hz: u32,
+        dead_time_ns: u32,
     ) -> Self {
-        let desired_freq_hz = 25_000;
         let clock_freq_hz = embassy_rp::clocks::clk_sys_freq();
         let divider = 16u8;
-        let period = (clock_freq_hz / (desired_freq_hz * divider as u32)) as u16 - 1;
+        let period = (clock_freq_hz / (pwm_frequency_hz * divider as u32)) as u16 - 1;
 
         let mut pwm_config = Config::default();
         pwm_config.top = period;
         pwm_config.divider = divider.into();
 
-        let pwm = Pwm::new_output_ab(slice, high, low, pwm_config);
+        let pwm = Pwm::new_output_ab(slice, high_pwm, low_pwm, pwm_config);
         let (high_pwm, low_pwm) = pwm.split();
 
         Self {
             high_pwm: high_pwm.unwrap(),
             low_pwm: low_pwm.unwrap(),
+            pwm_frequency_hz: pwm_frequency_hz,
+            dead_time_ns: dead_time_ns,
             _slice: PhantomData,
         }
     }
@@ -112,8 +117,8 @@ where
         let _ = self.high_pwm.set_duty_cycle_percent(percentage);
     }
 
-    /// Set the half bridge to PWM the low side gate to the specified duty cycle
-    fn set_low(&mut self, percentage: u8) {
+    /// Set the half bridge to be driven low
+    fn set_low(&mut self) {
         let _ = self.high_pwm.set_duty_cycle_fully_off();
         let _ = self.low_pwm.set_duty_cycle_fully_on();
     }
@@ -140,9 +145,9 @@ async fn main(spawner: Spawner) {
         ..
     } = p;
 
-    let half_bridge_a = HalfBridge::new(p.PWM_SLICE2, PIN_4, PIN_5);
-    let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13);
-    let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15);
+    let half_bridge_a = HalfBridge::new(p.PWM_SLICE2, PIN_4, PIN_5, 25_000, 0);
+    let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13, 25_000, 0);
+    let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15, 25_000, 0);
 
     let _ = spawner.spawn(bldc_driver_task(
         half_bridge_a,
@@ -163,7 +168,7 @@ async fn bldc_driver_task(
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(250));
+    let mut ticker = Ticker::every(Duration::from_millis(5000));
 
     loop {
         ticker.next().await;
@@ -173,19 +178,19 @@ async fn bldc_driver_task(
 
         match output.phase_a {
             PhaseState::HighDutyCycle(percentage) => half_bridge_a.set_high(percentage),
-            PhaseState::LowDutyCycle(percentage) => half_bridge_a.set_low(percentage),
+            PhaseState::Low => half_bridge_a.set_low(),
             PhaseState::HighImpedance => half_bridge_a.set_high_impedance(),
         };
 
         match output.phase_b {
             PhaseState::HighDutyCycle(percentage) => half_bridge_b.set_high(percentage),
-            PhaseState::LowDutyCycle(percentage) => half_bridge_b.set_low(percentage),
+            PhaseState::Low => half_bridge_b.set_low(),
             PhaseState::HighImpedance => half_bridge_b.set_high_impedance(),
         };
 
         match output.phase_c {
             PhaseState::HighDutyCycle(percentage) => half_bridge_c.set_high(percentage),
-            PhaseState::LowDutyCycle(percentage) => half_bridge_c.set_low(percentage),
+            PhaseState::Low => half_bridge_c.set_low(),
             PhaseState::HighImpedance => half_bridge_c.set_high_impedance(),
         };
     }
