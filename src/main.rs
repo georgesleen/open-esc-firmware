@@ -5,8 +5,6 @@ use core::marker::PhantomData;
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::interrupt::typelevel::PWM_IRQ_WRAP;
-use embassy_rp::pac::pwm;
 use embassy_rp::pwm::{ChannelAPin, ChannelBPin, Config, Pwm, PwmOutput, SetDutyCycle, Slice};
 use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
@@ -15,7 +13,7 @@ use {defmt_rtt as _, panic_probe as _};
 /// Fully on duty cycle
 const FULLY_ON_DUTY_CYCLE: u8 = 100;
 /// Max duty cycle for driving inverter phases
-const MAX_INVERTER_DUTY_CYCLE: u8 = 20;
+const MAX_INVERTER_DUTY_CYCLE: u8 = 15;
 /// Min duty cycle for driving inverter phases
 const MIN_INVERTER_DUTY_CYCLE: u8 = 0;
 
@@ -77,7 +75,7 @@ where
     pwm: Pwm<'d>,
     divider: u8,
     top: u16,
-    dead_time_ticks: u32,
+    dead_time_percentage: u8,
     _slice: PhantomData<S>,
 }
 
@@ -96,14 +94,16 @@ where
         // Calculate in tick units
         let clock_freq_hz = embassy_rp::clocks::clk_sys_freq();
         let divider = 16u8;
-        let period = (clock_freq_hz / (pwm_frequency_hz * divider as u32)) as u16 - 1;
-        let dead_time_ticks = (dead_time_ns * clock_freq_hz / divider as u32) / 1_000_000_000;
+        let period = (clock_freq_hz / (pwm_frequency_hz * divider as u32) - 1) as u16 / 2;
+        let dead_time_ticks =
+            ((dead_time_ns as u64 * clock_freq_hz as u64) / divider as u64 / 1_000_000_000) as u16;
+        let dead_time_percentage = ((dead_time_ticks as u32 * 100) / period as u32) as u8;
 
         // Configure default PWM settings
         let mut config = Config::default();
         config.invert_a = false;
         config.invert_b = false;
-        config.phase_correct = false;
+        config.phase_correct = true;
         config.enable = true;
         config.divider = divider.into();
         config.compare_a = 0;
@@ -116,7 +116,7 @@ where
             pwm: pwm,
             divider: divider,
             top: period,
-            dead_time_ticks: dead_time_ticks,
+            dead_time_percentage: dead_time_percentage,
             _slice: PhantomData,
         }
     }
@@ -125,8 +125,8 @@ where
     fn set_high(&mut self, percentage: u8) {
         let mut complementary_config = Config::default();
         complementary_config.invert_a = false;
-        complementary_config.invert_b = false;
-        complementary_config.phase_correct = false;
+        complementary_config.invert_b = true;
+        complementary_config.phase_correct = true;
         complementary_config.enable = true;
         complementary_config.divider = self.divider.into();
         complementary_config.compare_a = 0;
@@ -137,8 +137,10 @@ where
 
         let (high_pwm, low_pwm) = self.pwm.split_by_ref();
 
-        let _ = low_pwm.unwrap().set_duty_cycle_fully_off();
         let _ = high_pwm.unwrap().set_duty_cycle_percent(percentage);
+        let _ = low_pwm
+            .unwrap()
+            .set_duty_cycle_percent(percentage + self.dead_time_percentage);
     }
 
     /// Set the half bridge to be driven low
@@ -146,7 +148,7 @@ where
         let mut config = Config::default();
         config.invert_a = false;
         config.invert_b = false;
-        config.phase_correct = false;
+        config.phase_correct = true;
         config.enable = true;
         config.divider = self.divider.into();
         config.compare_a = 0;
@@ -166,7 +168,7 @@ where
         let mut config = Config::default();
         config.invert_a = false;
         config.invert_b = false;
-        config.phase_correct = false;
+        config.phase_correct = true;
         config.enable = true;
         config.divider = self.divider.into();
         config.compare_a = 0;
@@ -197,9 +199,9 @@ async fn main(spawner: Spawner) {
         ..
     } = p;
 
-    let half_bridge_a = HalfBridge::new(p.PWM_SLICE2, PIN_4, PIN_5, 25_000, 0);
-    let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13, 25_000, 0);
-    let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15, 25_000, 0);
+    let half_bridge_a = HalfBridge::new(p.PWM_SLICE2, PIN_4, PIN_5, 25_000, 1000);
+    let half_bridge_b = HalfBridge::new(p.PWM_SLICE6, PIN_12, PIN_13, 25_000, 1000);
+    let half_bridge_c = HalfBridge::new(p.PWM_SLICE7, PIN_14, PIN_15, 25_000, 1000);
 
     let _ = spawner.spawn(bldc_driver_task(
         half_bridge_a,
@@ -220,10 +222,9 @@ async fn bldc_driver_task(
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(500));
+    let mut ticker = Ticker::every(Duration::from_millis(25));
 
     loop {
-        ticker.next().await;
         step = (step + 1) % THREE_PHASE_COMMUTATION_TABLE.len();
 
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
@@ -245,5 +246,6 @@ async fn bldc_driver_task(
             PhaseState::Low => half_bridge_c.set_low(),
             PhaseState::HighImpedance => half_bridge_c.set_high_impedance(),
         };
+        ticker.next().await;
     }
 }
