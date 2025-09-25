@@ -5,6 +5,8 @@ use core::marker::PhantomData;
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
+use embassy_rp::interrupt::typelevel::PWM_IRQ_WRAP;
+use embassy_rp::pac::pwm;
 use embassy_rp::pwm::{ChannelAPin, ChannelBPin, Config, Pwm, PwmOutput, SetDutyCycle, Slice};
 use embassy_rp::Peri;
 use embassy_time::{Duration, Ticker};
@@ -59,7 +61,7 @@ enum PhaseState {
     HighImpedance,
 }
 
-/// Represents the control outputs for a three phase inverter.
+/// Represents the control outputs for a three phase inverter
 #[derive(Copy, Clone)]
 struct InverterOutput {
     phase_a: PhaseState,
@@ -73,6 +75,7 @@ where
     S: Slice,
 {
     pwm: Pwm<'d>,
+    divider: u8,
     top: u16,
     dead_time_ticks: u32,
     _slice: PhantomData<S>,
@@ -85,24 +88,33 @@ where
     /// Instantates a new half bridge driver with two GPIO and a PWM slice
     fn new(
         slice: Peri<'d, S>,
-        high_pwm: Peri<'d, impl ChannelAPin<S>>,
-        low_pwm: Peri<'d, impl ChannelBPin<S>>,
+        high_pin: Peri<'d, impl ChannelAPin<S>>,
+        low_pin: Peri<'d, impl ChannelBPin<S>>,
         pwm_frequency_hz: u32,
         dead_time_ns: u32,
     ) -> Self {
+        // Calculate in tick units
         let clock_freq_hz = embassy_rp::clocks::clk_sys_freq();
         let divider = 16u8;
         let period = (clock_freq_hz / (pwm_frequency_hz * divider as u32)) as u16 - 1;
         let dead_time_ticks = (dead_time_ns * clock_freq_hz / divider as u32) / 1_000_000_000;
 
-        let mut pwm_config = Config::default();
-        pwm_config.top = period;
-        pwm_config.divider = divider.into();
+        // Configure default PWM settings
+        let mut config = Config::default();
+        config.invert_a = false;
+        config.invert_b = false;
+        config.phase_correct = false;
+        config.enable = true;
+        config.divider = divider.into();
+        config.compare_a = 0;
+        config.compare_b = 0;
+        config.top = period;
 
-        let pwm = Pwm::new_output_ab(slice, high_pwm, low_pwm, pwm_config);
+        let pwm = Pwm::new_output_ab(slice, high_pin, low_pin, config);
 
         Self {
             pwm: pwm,
+            divider: divider,
             top: period,
             dead_time_ticks: dead_time_ticks,
             _slice: PhantomData,
@@ -111,6 +123,18 @@ where
 
     /// Set the half bridge to PWM the high side gate to the specified duty cycle
     fn set_high(&mut self, percentage: u8) {
+        let mut complementary_config = Config::default();
+        complementary_config.invert_a = false;
+        complementary_config.invert_b = false;
+        complementary_config.phase_correct = false;
+        complementary_config.enable = true;
+        complementary_config.divider = self.divider.into();
+        complementary_config.compare_a = 0;
+        complementary_config.compare_b = 0;
+        complementary_config.top = self.top;
+
+        self.pwm.set_config(&complementary_config);
+
         let (high_pwm, low_pwm) = self.pwm.split_by_ref();
 
         let _ = low_pwm.unwrap().set_duty_cycle_fully_off();
@@ -119,6 +143,18 @@ where
 
     /// Set the half bridge to be driven low
     fn set_low(&mut self) {
+        let mut config = Config::default();
+        config.invert_a = false;
+        config.invert_b = false;
+        config.phase_correct = false;
+        config.enable = true;
+        config.divider = self.divider.into();
+        config.compare_a = 0;
+        config.compare_b = 0;
+        config.top = self.top;
+
+        self.pwm.set_config(&config);
+
         let (high_pwm, low_pwm) = self.pwm.split_by_ref();
 
         let _ = high_pwm.unwrap().set_duty_cycle_fully_off();
@@ -127,6 +163,18 @@ where
 
     /// Changes the half bridge to a high impedance output
     fn set_high_impedance(&mut self) {
+        let mut config = Config::default();
+        config.invert_a = false;
+        config.invert_b = false;
+        config.phase_correct = false;
+        config.enable = true;
+        config.divider = self.divider.into();
+        config.compare_a = 0;
+        config.compare_b = 0;
+        config.top = self.top;
+
+        self.pwm.set_config(&config);
+
         let (high_pwm, low_pwm) = self.pwm.split_by_ref();
 
         let _ = high_pwm.unwrap().set_duty_cycle_fully_off();
