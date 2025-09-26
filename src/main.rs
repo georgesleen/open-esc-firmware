@@ -122,7 +122,7 @@ where
     }
 
     /// Set the half bridge to PWM the high side gate to the specified duty cycle
-    fn set_high(&mut self, percentage: u8) {
+    fn set_pwm(&mut self, percentage: u8) {
         let mut complementary_config = Config::default();
         complementary_config.invert_a = false;
         complementary_config.invert_b = true;
@@ -141,26 +141,6 @@ where
         let _ = low_pwm
             .unwrap()
             .set_duty_cycle_percent(percentage + self.dead_time_percentage);
-    }
-
-    /// Set the half bridge to be driven low
-    fn set_low(&mut self) {
-        let mut config = Config::default();
-        config.invert_a = false;
-        config.invert_b = false;
-        config.phase_correct = true;
-        config.enable = true;
-        config.divider = self.divider.into();
-        config.compare_a = 0;
-        config.compare_b = 0;
-        config.top = self.top;
-
-        self.pwm.set_config(&config);
-
-        let (high_pwm, low_pwm) = self.pwm.split_by_ref();
-
-        let _ = high_pwm.unwrap().set_duty_cycle_fully_off();
-        let _ = low_pwm.unwrap().set_duty_cycle_fully_on();
     }
 
     /// Changes the half bridge to a high impedance output
@@ -222,7 +202,7 @@ async fn bldc_driver_task(
     mut half_bridge_c: HalfBridge<'static, embassy_rp::peripherals::PWM_SLICE7>,
 ) {
     let mut step: usize = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(25));
+    let mut ticker = Ticker::every(Duration::from_millis(250));
 
     loop {
         step = (step + 1) % THREE_PHASE_COMMUTATION_TABLE.len();
@@ -230,20 +210,20 @@ async fn bldc_driver_task(
         let output = THREE_PHASE_COMMUTATION_TABLE[step];
 
         match output.phase_a {
-            PhaseState::HighDutyCycle(percentage) => half_bridge_a.set_high(percentage),
-            PhaseState::Low => half_bridge_a.set_low(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_a.set_pwm(percentage),
+            PhaseState::Low => half_bridge_a.set_pwm(0),
             PhaseState::HighImpedance => half_bridge_a.set_high_impedance(),
         };
 
         match output.phase_b {
-            PhaseState::HighDutyCycle(percentage) => half_bridge_b.set_high(percentage),
-            PhaseState::Low => half_bridge_b.set_low(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_b.set_pwm(percentage),
+            PhaseState::Low => half_bridge_b.set_pwm(0),
             PhaseState::HighImpedance => half_bridge_b.set_high_impedance(),
         };
 
         match output.phase_c {
-            PhaseState::HighDutyCycle(percentage) => half_bridge_c.set_high(percentage),
-            PhaseState::Low => half_bridge_c.set_low(),
+            PhaseState::HighDutyCycle(percentage) => half_bridge_c.set_pwm(percentage),
+            PhaseState::Low => half_bridge_c.set_pwm(0),
             PhaseState::HighImpedance => half_bridge_c.set_high_impedance(),
         };
         ticker.next().await;
